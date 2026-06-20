@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 
-from rl.common import compute_action, ensure_ray, load_algorithm
-from rl.env import AGENTS, FireWaterEnv
+from common import compute_action, ensure_ray, load_algorithm
+from env import AGENTS, FireWaterEnv
 
 
 def parse_args():

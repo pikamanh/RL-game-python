@@ -10,7 +10,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.policy.policy import PolicySpec
 from ray.tune.registry import register_env
 
-from rl.env import AGENTS, FireWaterEnv
+from env import AGENTS, FireWaterEnv
 
 
 ENV_NAME = "firewater_multi_agent"

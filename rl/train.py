@@ -4,7 +4,7 @@ import argparse
 import math
 from pathlib import Path
 
-from rl.common import build_ppo_config, ensure_ray
+from common import build_ppo_config, ensure_ray
 
 
 def parse_args():
