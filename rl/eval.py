@@ -1,55 +1,65 @@
 from __future__ import annotations
 
-import sys
+import argparse
+import time
 
-import ray
-from ray.rllib.algorithms.ppo import PPO
+from rl.common import compute_action, ensure_ray, load_algorithm
+from rl.env import AGENTS, FireWaterEnv
 
-from mappo import register_multiagent_env
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate a trained Fireboy/Watergirl multi-agent checkpoint.")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--level", type=int, choices=[1, 2], default=1)
+    parser.add_argument("--episodes", type=int, default=5)
+    parser.add_argument("--max-steps", type=int, default=3000)
+    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--sleep", type=float, default=0.0)
+    parser.add_argument("--explore", action="store_true")
+    parser.add_argument("--shared-policy", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--step-size", type=float, default=5.0)
+    parser.add_argument("--gravity", type=float, default=0.55)
+    parser.add_argument("--jump-velocity", type=float, default=8.0)
+    return parser.parse_args()
 
 
 def main():
-    checkpoint = sys.argv[1] if len(sys.argv) > 1 else None
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
-    register_multiagent_env()
+    args = parse_args()
+    ensure_ray()
+    algo = load_algorithm(args.checkpoint)
+    env = FireWaterEnv(vars(args))
 
-    if checkpoint:
-        algo = PPO.from_checkpoint(checkpoint)
-    else:
-        raise SystemExit("Pass a Ray checkpoint directory, for example: python rl/eval.py checkpoints/...")
-
-    env = algo.workers.local_worker().env
-    episodes = 20
-    wins = 0
-    rewards = []
-    lengths = []
-
-    for _ in range(episodes):
-        obs, _ = env.reset()
-        total_reward = 0.0
-        steps = 0
-        while True:
-            actions = {
-                agent_id: algo.compute_single_action(agent_obs, policy_id="shared_policy")
-                for agent_id, agent_obs in obs.items()
-            }
-            obs, reward, terminated, truncated, info = env.step(actions)
-            total_reward += reward["fireboy"] + reward["watergirl"]
-            steps += 1
-            if terminated["__all__"] or truncated["__all__"]:
-                wins += int(info.get("win", False))
-                rewards.append(total_reward)
-                lengths.append(steps)
-                break
-
-    print(
-        {
-            "win_rate": wins / episodes,
-            "avg_reward": sum(rewards) / len(rewards),
-            "avg_len": sum(lengths) / len(lengths),
-        }
-    )
+    try:
+        wins = 0
+        for episode in range(1, args.episodes + 1):
+            obs, _ = env.reset()
+            total_reward = 0.0
+            done = False
+            info = {}
+            while not done:
+                actions = {
+                    agent: compute_action(algo, obs[agent], agent, args.shared_policy, explore=args.explore)
+                    for agent in AGENTS
+                }
+                obs, rewards, terminateds, truncateds, infos = env.step(actions)
+                total_reward += sum(rewards.values()) / len(rewards)
+                done = terminateds["__all__"] or truncateds["__all__"]
+                info = infos[AGENTS[0]]
+                if args.render:
+                    env.render()
+                if args.sleep > 0:
+                    time.sleep(args.sleep)
+            wins += int(bool(info.get("win")))
+            print(
+                f"episode={episode} reward={total_reward:.3f} "
+                f"steps={info.get('steps')} win={info.get('win')} death={info.get('death')}"
+            )
+        print(f"wins={wins}/{args.episodes}")
+    finally:
+        env.close()
+        algo.stop()
 
 
 if __name__ == "__main__":
     main()
+

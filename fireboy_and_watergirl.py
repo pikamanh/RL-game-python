@@ -1,6 +1,13 @@
 import pygame,time
 import sys
 
+if "--rl-realtime" in sys.argv:
+    sys.argv.remove("--rl-realtime")
+    from rl.play_realtime import main as run_rl_realtime
+
+    run_rl_realtime()
+    sys.exit()
+
 pygame.init()
 pygame.mixer.init()
 # إعدادات الشاشة
