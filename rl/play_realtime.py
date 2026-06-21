@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import argparse
 
-from common import compute_action, ensure_ray, load_algorithm
-from env import AGENTS, FireWaterEnv
+try:
+    from .common import compute_action, ensure_ray, load_algorithm, load_algorithm_from_weights
+    from .env import AGENTS, FireWaterEnv
+except ImportError:
+    from common import compute_action, ensure_ray, load_algorithm, load_algorithm_from_weights
+    from env import AGENTS, FireWaterEnv
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a trained agent in real time with automatic reset.")
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint")
+    parser.add_argument("--weights")
     parser.add_argument("--level", type=int, choices=[1, 2], default=1)
     parser.add_argument("--max-steps", type=int, default=3000)
     parser.add_argument("--explore", action="store_true")
@@ -21,8 +26,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if bool(args.checkpoint) == bool(args.weights):
+        raise SystemExit("Use exactly one of --checkpoint or --weights.")
     ensure_ray()
-    algo = load_algorithm(args.checkpoint)
+    algo = load_algorithm_from_weights(args.weights, args) if args.weights else load_algorithm(args.checkpoint)
     env = FireWaterEnv({**vars(args), "render_mode": "human", "auto_reset_on_done": True})
     obs, _ = env.reset()
 

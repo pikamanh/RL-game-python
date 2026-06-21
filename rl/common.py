@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import ray
 from gymnasium import spaces
 from ray.rllib.algorithms.algorithm import Algorithm
@@ -10,7 +13,10 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.policy.policy import PolicySpec
 from ray.tune.registry import register_env
 
-from env import AGENTS, FireWaterEnv
+try:
+    from .env import AGENTS, FireWaterEnv
+except ImportError:
+    from env import AGENTS, FireWaterEnv
 
 
 ENV_NAME = "firewater_multi_agent"
@@ -90,7 +96,70 @@ def ensure_ray(local_mode: bool = False):
 
 def load_algorithm(checkpoint: str) -> Algorithm:
     register_firewater_env()
-    return Algorithm.from_checkpoint(str(Path(checkpoint).expanduser()))
+    checkpoint_path = Path(checkpoint).expanduser().resolve()
+    try:
+        return Algorithm.from_checkpoint(str(checkpoint_path))
+    except TypeError as exc:
+        if "code expected at most" in str(exc):
+            raise RuntimeError(
+                "Cannot load this checkpoint in the current Python/Ray environment. "
+                "Use the same Python version and Ray/RLlib version that created the checkpoint, "
+                "or retrain/export the checkpoint in this environment."
+            ) from exc
+        raise
+
+
+def build_inference_algorithm(args: Any) -> Algorithm:
+    defaults = {
+        "framework": "torch",
+        "lr": 3e-4,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "entropy_coeff": 0.02,
+        "clip_param": 0.2,
+        "train_batch_size": 4096,
+        "minibatch_size": 512,
+        "num_epochs": 10,
+        "num_workers": 0,
+        "num_gpus": 0.0,
+        "batch_mode": "complete_episodes",
+        "rollout_fragment_length": "auto",
+    }
+    values = vars(args).copy()
+    defaults.update(values)
+    config = build_ppo_config(SimpleNamespace(**defaults))
+    return config.build_algo() if hasattr(config, "build_algo") else config.build()
+
+
+def save_policy_weights(algo: Algorithm, output: str | Path, shared_policy: bool = True) -> Path:
+    output = Path(output).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    policy_ids = ["shared_policy"] if shared_policy else ["fire_policy", "water_policy"]
+
+    arrays = {}
+    metadata = {"policy_ids": policy_ids, "weights": {}}
+    index = 0
+    for policy_id in policy_ids:
+        metadata["weights"][policy_id] = []
+        for weight_name, value in algo.get_policy(policy_id).get_weights().items():
+            array_name = f"arr_{index}"
+            arrays[array_name] = value
+            metadata["weights"][policy_id].append([weight_name, array_name])
+            index += 1
+
+    arrays["metadata"] = np.array(json.dumps(metadata))
+    np.savez_compressed(output, **arrays)
+    return output
+
+
+def load_algorithm_from_weights(weights: str | Path, args: Any) -> Algorithm:
+    algo = build_inference_algorithm(args)
+    data = np.load(Path(weights).expanduser().resolve(), allow_pickle=False)
+    metadata = json.loads(str(data["metadata"]))
+    for policy_id, entries in metadata["weights"].items():
+        policy_weights = {weight_name: data[array_name] for weight_name, array_name in entries}
+        algo.get_policy(policy_id).set_weights(policy_weights)
+    return algo
 
 
 def policy_id_for_agent(agent_id: str, shared_policy: bool) -> str:

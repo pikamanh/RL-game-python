@@ -3,13 +3,18 @@ from __future__ import annotations
 import argparse
 import time
 
-from common import compute_action, ensure_ray, load_algorithm
-from env import AGENTS, FireWaterEnv
+try:
+    from .common import compute_action, ensure_ray, load_algorithm, load_algorithm_from_weights
+    from .env import AGENTS, FireWaterEnv
+except ImportError:
+    from common import compute_action, ensure_ray, load_algorithm, load_algorithm_from_weights
+    from env import AGENTS, FireWaterEnv
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a trained Fireboy/Watergirl multi-agent checkpoint.")
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint")
+    parser.add_argument("--weights")
     parser.add_argument("--level", type=int, choices=[1, 2], default=1)
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=3000)
@@ -25,8 +30,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if bool(args.checkpoint) == bool(args.weights):
+        raise SystemExit("Use exactly one of --checkpoint or --weights.")
     ensure_ray()
-    algo = load_algorithm(args.checkpoint)
+    algo = load_algorithm_from_weights(args.weights, args) if args.weights else load_algorithm(args.checkpoint)
     env = FireWaterEnv(vars(args))
 
     try:
@@ -62,4 +69,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import math
+import shutil
 from pathlib import Path
 
-from common import build_ppo_config, ensure_ray
+try:
+    from .common import build_ppo_config, ensure_ray, save_policy_weights
+except ImportError:
+    from common import build_ppo_config, ensure_ray, save_policy_weights
 
 
 def parse_args():
@@ -14,6 +18,9 @@ def parse_args():
     parser.add_argument("--stop-iters", type=int, default=500)
     parser.add_argument("--stop-reward", type=float, default=90.0)
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
+    parser.add_argument("--zip-output", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--zip-path", type=Path, default=None)
+    parser.add_argument("--weights-output", type=Path, default=None)
     parser.add_argument("--checkpoint-every", type=int, default=50)
     parser.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--best-checkpoint-name", default="best")
@@ -55,8 +62,36 @@ def is_number(value):
     return isinstance(value, (int, float)) and not math.isnan(float(value))
 
 
+def checkpoint_path(checkpoint):
+    return checkpoint.checkpoint.path if hasattr(checkpoint, "checkpoint") else str(checkpoint)
+
+
+def zip_checkpoints(checkpoint_dir: Path, zip_path: Path | None) -> Path:
+    checkpoint_dir = checkpoint_dir.expanduser().resolve()
+    if zip_path is None:
+        zip_path = checkpoint_dir.with_suffix(".zip")
+    else:
+        zip_path = zip_path.expanduser().resolve()
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_base = zip_path.with_suffix("")
+    archive = shutil.make_archive(
+        str(archive_base),
+        "zip",
+        root_dir=checkpoint_dir.parent,
+        base_dir=checkpoint_dir.name,
+    )
+    archive = Path(archive)
+    if archive != zip_path:
+        if zip_path.exists():
+            zip_path.unlink()
+        archive.rename(zip_path)
+    return zip_path
+
+
 def main():
     args = parse_args()
+    args.checkpoint_dir = args.checkpoint_dir.expanduser().resolve()
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     ensure_ray(local_mode=args.ray_local_mode)
     config = build_ppo_config(args)
@@ -96,23 +131,28 @@ def main():
             if args.save_best and is_number(reward_mean) and reward_mean > best_reward:
                 best_reward = reward_mean
                 checkpoint = algo.save(str(args.checkpoint_dir / args.best_checkpoint_name))
-                last_checkpoint = checkpoint.checkpoint.path if hasattr(checkpoint, "checkpoint") else str(checkpoint)
+                last_checkpoint = checkpoint_path(checkpoint)
                 print(f"best_checkpoint={last_checkpoint} best_reward={best_reward:.3f}")
 
             should_save = iteration % args.checkpoint_every == 0 or (is_number(reward_mean) and reward_mean >= args.stop_reward)
             if should_save:
                 checkpoint = algo.save(str(args.checkpoint_dir / f"iter_{iteration:05d}"))
-                last_checkpoint = checkpoint.checkpoint.path if hasattr(checkpoint, "checkpoint") else str(checkpoint)
+                last_checkpoint = checkpoint_path(checkpoint)
                 print(f"checkpoint={last_checkpoint}")
 
             if is_number(reward_mean) and reward_mean >= args.stop_reward:
                 break
     finally:
-        if last_checkpoint is None:
-            checkpoint = algo.save(str(args.checkpoint_dir / "latest"))
-            last_checkpoint = checkpoint.checkpoint.path if hasattr(checkpoint, "checkpoint") else str(checkpoint)
-            print(f"checkpoint={last_checkpoint}")
+        checkpoint = algo.save(str(args.checkpoint_dir / "latest"))
+        last_checkpoint = checkpoint_path(checkpoint)
+        print(f"latest_checkpoint={last_checkpoint}")
+        if args.weights_output:
+            weights_path = save_policy_weights(algo, args.weights_output, args.shared_policy)
+            print(f"policy_weights={weights_path}")
         algo.stop()
+        if args.zip_output:
+            zip_path = zip_checkpoints(args.checkpoint_dir, args.zip_path)
+            print(f"checkpoint_zip={zip_path}")
 
 
 if __name__ == "__main__":
