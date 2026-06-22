@@ -1,12 +1,127 @@
+import argparse
+import atexit
+import os
 import pygame,time
 import sys
 
-if "--rl-realtime" in sys.argv:
-    sys.argv.remove("--rl-realtime")
-    from rl.play_realtime import main as run_rl_realtime
+from rl.geometry import FIREBOY, WATERGIRL, is_lethal_hazard, make_hazard_rects
 
-    run_rl_realtime()
-    sys.exit()
+os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ.setdefault("PYTORCH_JIT", "0")
+
+_rl_parser = argparse.ArgumentParser(add_help=False)
+_rl_parser.add_argument("--rl-realtime", action="store_true")
+_rl_parser.add_argument("--checkpoint")
+_rl_parser.add_argument("--weights")
+_rl_parser.add_argument("--level", type=int, choices=[1, 2], default=1)
+_rl_parser.add_argument("--explore", action="store_true")
+_rl_parser.add_argument("--shared-policy", action=argparse.BooleanOptionalAction, default=True)
+_rl_args, _remaining_argv = _rl_parser.parse_known_args(sys.argv[1:])
+sys.argv = [sys.argv[0], *_remaining_argv]
+RL_REALTIME = _rl_args.rl_realtime
+_RL_KEYS = set()
+_RL_ALGO = None
+_RL_ENV = None
+_RL_PREV_POS = None
+
+
+class _RLKeyState:
+    def __getitem__(self, key):
+        return key in _RL_KEYS
+
+
+_RL_KEY_STATE = _RLKeyState()
+
+
+def get_current_keys():
+    return _RL_KEY_STATE if RL_REALTIME else pygame.key.get_pressed()
+
+
+def _close_rl_controller():
+    global _RL_ALGO
+    if _RL_ALGO is not None:
+        _RL_ALGO.stop()
+        _RL_ALGO = None
+
+
+atexit.register(_close_rl_controller)
+
+
+def _init_rl_controller(level):
+    global _RL_ALGO, _RL_ENV
+    if not RL_REALTIME or _RL_ALGO is not None:
+        return
+    if bool(_rl_args.checkpoint) == bool(_rl_args.weights):
+        raise SystemExit("Use exactly one of --checkpoint or --weights with --rl-realtime.")
+
+    from rl.common import ensure_ray, load_algorithm, load_algorithm_from_weights
+    from rl.env import FireWaterEnv
+
+    ensure_ray()
+    if _rl_args.weights:
+        _RL_ALGO = load_algorithm_from_weights(_rl_args.weights, _rl_args)
+    else:
+        _RL_ALGO = load_algorithm(_rl_args.checkpoint)
+    _RL_ENV = FireWaterEnv({"level": level})
+
+
+def _action_keys(action, left_key, right_key, jump_key):
+    if action == 1:
+        return {left_key}
+    if action == 2:
+        return {right_key}
+    if action == 3:
+        return {jump_key}
+    if action == 4:
+        return {left_key, jump_key}
+    if action == 5:
+        return {right_key, jump_key}
+    return set()
+
+
+def update_rl_actions_for_game(level):
+    global _RL_KEYS, _RL_PREV_POS
+    if not RL_REALTIME:
+        return
+
+    _init_rl_controller(level)
+    from rl.common import compute_action
+    from rl.env import AGENTS
+
+    if _RL_PREV_POS is None:
+        _RL_PREV_POS = (x, y, o, p)
+    prev_x, prev_y, prev_o, prev_p = _RL_PREV_POS
+    _RL_PREV_POS = (x, y, o, p)
+
+    _RL_ENV.fire.x = float(x)
+    _RL_ENV.fire.y = float(y)
+    _RL_ENV.fire.vx = float(x - prev_x)
+    _RL_ENV.fire.vy = float(y - prev_y)
+    _RL_ENV.fire.on_ground = bool(globals().get("on_platform_fireboy", False))
+    _RL_ENV.fire.door_opened = bool(globals().get("fireboy_door_opened", False))
+    _RL_ENV.water.x = float(o)
+    _RL_ENV.water.y = float(p)
+    _RL_ENV.water.vx = float(o - prev_o)
+    _RL_ENV.water.vy = float(p - prev_p)
+    _RL_ENV.water.on_ground = bool(globals().get("on_platform_watergirl", False))
+    _RL_ENV.water.door_opened = bool(globals().get("watergirl_door_opened", False))
+    if "red_gems" in globals():
+        _RL_ENV.red_gems = set(red_gems)
+    if "blue_gems" in globals():
+        _RL_ENV.blue_gems = set(blue_gems)
+
+    obs = _RL_ENV._obs_all()
+    fire_action = compute_action(_RL_ALGO, obs[AGENTS[0]], AGENTS[0], _rl_args.shared_policy, explore=_rl_args.explore)
+    water_action = compute_action(_RL_ALGO, obs[AGENTS[1]], AGENTS[1], _rl_args.shared_policy, explore=_rl_args.explore)
+    _RL_KEYS = (
+        _action_keys(fire_action, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP)
+        | _action_keys(water_action, pygame.K_a, pygame.K_d, pygame.K_w)
+    )
+
+
+if RL_REALTIME:
+    _init_rl_controller(_rl_args.level)
 
 pygame.init()
 pygame.mixer.init()
@@ -27,7 +142,7 @@ start_rect = start_text.get_rect(center=(WIDTH1 //2-10, (HEIGHT1 // 2)+20))
 next_level=pygame.image.load("next_level.png")
 next_level_rect=pygame.Rect(540,498,next_level.get_width(),next_level.get_height())
 
-current_screen = "start" 
+current_screen = "game" if RL_REALTIME else "start"
 running1 = True
 while running1:
     for event in pygame.event.get():
@@ -140,7 +255,7 @@ while running1:
         on_platform=False
         def moving_fire():
             global left, right, moves, x, y, jump_velocity, is_jumping,on_platform_fireboy
-            keys = pygame.key.get_pressed()
+            keys = get_current_keys()
             hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
             on_platform_fireboy = False
             if not is_jumping:
@@ -181,7 +296,7 @@ while running1:
                 is_jumping = True
         def moving_girl():
             global left1, right1, o, p, jump_velocity1, is_jumping1, moves1,on_platform_watergirl
-            keys = pygame.key.get_pressed()
+            keys = get_current_keys()
             hero_girl_rect = pygame.Rect(o, p, hero_girl.get_width(), hero_girl.get_height())
             on_platform_watergirl = False
             if not is_jumping1:
@@ -260,6 +375,28 @@ while running1:
             global x, y, o, p,red_gems, blue_gems, gem_size,left, left1, right, right1, moves, moves1,on_platform_watergirl
             global fireboy_score, watergirl_score,fireboy_door_opened, watergirl_door_opened,arm_opened, on_platform_fireboy,current_screen
             global is_jumping, is_jumping1, jump_velocity1, jump_velocity,timer_running,total_blue_gems,total_red_gems
+
+            def reset_level1_for_rl():
+                global x, y, o, p, red_gems, blue_gems, left, left1, right, right1, moves, moves1
+                global fireboy_score, watergirl_score, fireboy_door_opened, watergirl_door_opened, arm_opened
+                global is_jumping, is_jumping1, jump_velocity, jump_velocity1, timer_running, start_time
+                global _RL_PREV_POS, _RL_KEYS
+                x, y = 60, 790
+                o, p = 60, 620
+                left = right = left1 = right1 = False
+                moves = moves1 = 0
+                is_jumping = is_jumping1 = False
+                jump_velocity = jump_velocity1 = 8
+                fireboy_score = watergirl_score = 0
+                fireboy_door_opened = watergirl_door_opened = False
+                arm_opened = False
+                red_gems = [(290, 50), (200, 360), (1020, 650), (545, 731)]
+                blue_gems = [(60, 130), (700, 390), (550, 556), (775, 731)]
+                timer_running = True
+                start_time = pygame.time.get_ticks()
+                _RL_PREV_POS = None
+                _RL_KEYS = set()
+
             running = True
             while running:
                 pygame.time.delay(3)
@@ -269,6 +406,7 @@ while running1:
                     if event.type == pygame.MOUSEBUTTONDOWN:
                         if current_screen == "game" and next_level_rect.collidepoint(event.pos):
                             current_screen = "level2"
+                update_rl_actions_for_game(1)
                 moving_fire()
                 moving_girl()
                 for platform in platforms:
@@ -341,16 +479,21 @@ while running1:
                     p += gravity1
                     is_jumping1 = True             
             # المناطق القاتلة
-                fire_lake_rect = pygame.Rect(518, 792, fire_lake.get_width()-45, fire_lake.get_height()-18)
-                water_lake_rect = pygame.Rect(758, 792, water_lake.get_width()-45, water_lake.get_height()-18)
+                hazard_rects = make_hazard_rects(1)
                 fire_lake_rect1 = pygame.Rect(510, 783, fire_lake.get_width()-20, fire_lake.get_height()-16)
                 water_lake_rect1 = pygame.Rect(742, 783, water_lake.get_width()-20, water_lake.get_height()-16)
-                green_lake_rect = pygame.Rect(686, 622, green_lake.get_width()-45, green_lake.get_height()-17)
-                if hero_boy_rect.colliderect(water_lake_rect) or hero_girl_rect.colliderect(fire_lake_rect) or\
-                    hero_boy_rect.colliderect(green_lake_rect) or hero_girl_rect.colliderect(green_lake_rect):  
+                player_hazards = ((FIREBOY, hero_boy_rect), (WATERGIRL, hero_girl_rect))
+                if any(
+                    player_rect.colliderect(hazard_rect) and is_lethal_hazard(agent, hazard_kind)
+                    for agent, player_rect in player_hazards
+                    for hazard_kind, hazard_rect in hazard_rects
+                ):
+                    if RL_REALTIME:
+                        reset_level1_for_rl()
+                        continue
                     timer_running = False
-                    pygame.mixer.music.stop()   
-                    channel2.play(end_s) 
+                    pygame.mixer.music.stop()
+                    channel2.play(end_s)
                     time.sleep(end_s.get_length())
                     screen.blit(game_over,(145,170))
                     running=False   
@@ -536,7 +679,7 @@ while running1:
                         box_rect.x = WIDTH - box_rect.width
         def moving_fire():
             global left, right, moves, x, y, jump_velocity, is_jumping
-            keys = pygame.key.get_pressed()
+            keys = get_current_keys()
             hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
             on_platform_fireboy = False
             if not is_jumping:
@@ -577,7 +720,7 @@ while running1:
                 is_jumping = True
         def moving_girl():
             global left1, right1, o, p, jump_velocity1, is_jumping1, moves1
-            keys = pygame.key.get_pressed()
+            keys = get_current_keys()
             hero_girl_rect = pygame.Rect(o, p, hero_girl.get_width(), hero_girl.get_height())
             on_platform_watergirl = False
             if not is_jumping1:
@@ -737,6 +880,7 @@ while running1:
                 screen.blit(box, box_rect.topleft)
                 gems()
                 draw_gems()
+                update_rl_actions_for_game(2)
                 moving_fire()
                 moving_girl()
                 hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())

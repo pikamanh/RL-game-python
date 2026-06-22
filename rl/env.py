@@ -10,6 +10,11 @@ import pygame
 from gymnasium import spaces
 
 try:
+    from .geometry import LETHAL_HAZARDS, make_hazard_rects
+except ImportError:
+    from geometry import LETHAL_HAZARDS, make_hazard_rects
+
+try:
     from ray.rllib.env.multi_agent_env import MultiAgentEnv
 except Exception:  # pragma: no cover - lets the env run without Ray installed.
     MultiAgentEnv = object
@@ -74,7 +79,10 @@ class FireWaterEnv(MultiAgentEnv):
         self.screen: pygame.Surface | None = None
         self.clock: pygame.time.Clock | None = None
         self.steps = 0
-        self.last_team_distance = 0.0
+        self.last_fire_dist = 0.0
+        self.last_water_dist = 0.0
+        self._fire_door_rewarded = False
+        self._water_door_rewarded = False
         self.fire = PlayerState(0, 0)
         self.water = PlayerState(0, 0)
         self.red_gems: set[tuple[int, int]] = set()
@@ -96,14 +104,20 @@ class FireWaterEnv(MultiAgentEnv):
         self.arm_opened = False
         self.button_opened = False
         self._load_level()
-        self.last_team_distance = self._team_distance()
+        self.last_fire_dist = self._distance_to_rect(self.fire, self.fire_door)
+        self.last_water_dist = self._distance_to_rect(self.water, self.water_door)
+        self._fire_door_rewarded = False
+        self._water_door_rewarded = False
         obs = self._obs_all()
         infos = {agent: {} for agent in AGENTS}
         return obs, infos
 
     def step(self, action_dict: dict[str, int]):
         self.steps += 1
-        old_distance = self.last_team_distance
+        old_fire_dist = self.last_fire_dist
+        old_water_dist = self.last_water_dist
+        old_red_count = len(self.red_gems)
+        old_blue_count = len(self.blue_gems)
 
         self._apply_player_action(self.fire, int(action_dict.get(FIREBOY, ACTION_NOOP)))
         self._apply_player_action(self.water, int(action_dict.get(WATERGIRL, ACTION_NOOP)))
@@ -116,24 +130,56 @@ class FireWaterEnv(MultiAgentEnv):
         win = self.fire.door_opened and self.water.door_opened
         truncated = self.steps >= self.max_steps
 
-        new_distance = self._team_distance()
-        progress_reward = (old_distance - new_distance) * 0.02
-        self.last_team_distance = new_distance
+        new_fire_dist = self._distance_to_rect(self.fire, self.fire_door)
+        new_water_dist = self._distance_to_rect(self.water, self.water_door)
+        self.last_fire_dist = new_fire_dist
+        self.last_water_dist = new_water_dist
 
-        reward = -0.01 + progress_reward
+        # Individual progress rewards — each agent rewarded for own door
+        fire_progress = (old_fire_dist - new_fire_dist) * 0.05
+        water_progress = (old_water_dist - new_water_dist) * 0.05
+
+        # Gem collection rewards
+        fire_gem_bonus = (old_red_count - len(self.red_gems)) * 2.0
+        water_gem_bonus = (old_blue_count - len(self.blue_gems)) * 2.0
+
+        # One-time door-reached bonus
+        fire_door_bonus = 0.0
+        if self.fire.door_opened and not self._fire_door_rewarded:
+            fire_door_bonus = 20.0
+            self._fire_door_rewarded = True
+        water_door_bonus = 0.0
+        if self.water.door_opened and not self._water_door_rewarded:
+            water_door_bonus = 20.0
+            self._water_door_rewarded = True
+
+        # Proximity penalty for approaching lethal hazards
+        fire_hazard_pen = self._hazard_proximity_penalty(self.fire, LETHAL_HAZARDS[FIREBOY])
+        water_hazard_pen = self._hazard_proximity_penalty(self.water, LETHAL_HAZARDS[WATERGIRL])
+
+        shared_step = -0.01
         if self._both_idle(action_dict):
-            reward -= 0.04
+            shared_step -= 0.04
         if self.arm_opened:
-            reward += 0.005
+            shared_step += 0.005
         if self.button_opened:
-            reward += 0.005
+            shared_step += 0.005
+
+        fire_reward = shared_step + fire_progress + fire_gem_bonus + fire_door_bonus - fire_hazard_pen
+        water_reward = shared_step + water_progress + water_gem_bonus + water_door_bonus - water_hazard_pen
+
         if death:
-            reward -= 20.0
+            fire_died = self._death_agent(self.fire, LETHAL_HAZARDS[FIREBOY])
+            water_died = self._death_agent(self.water, LETHAL_HAZARDS[WATERGIRL])
+            # Primary penalty to agent that caused the death, smaller cross-penalty
+            fire_reward -= 20.0 if fire_died else 5.0
+            water_reward -= 20.0 if water_died else 5.0
         if win:
-            reward += 100.0
+            fire_reward += 100.0
+            water_reward += 100.0
 
         obs = self._obs_all()
-        rewards = {agent: float(reward) for agent in AGENTS}
+        rewards = {FIREBOY: float(fire_reward), WATERGIRL: float(water_reward)}
         terminateds = {agent: bool(death or win) for agent in AGENTS}
         truncateds = {agent: bool(truncated) for agent in AGENTS}
         terminateds["__all__"] = bool(death or win)
@@ -223,11 +269,7 @@ class FireWaterEnv(MultiAgentEnv):
             ]
             self.fire_door = pygame.Rect(910, 85, 45, 70)
             self.water_door = pygame.Rect(995, 85, 45, 70)
-            self.hazards = [
-                Hazard(pygame.Rect(518, 792, 180, 20), "fire"),
-                Hazard(pygame.Rect(758, 792, 180, 20), "water"),
-                Hazard(pygame.Rect(686, 622, 160, 20), "poison"),
-            ]
+            self.hazards = [Hazard(rect, kind) for kind, rect in make_hazard_rects(self.level)]
             self.red_gems = {(290, 50), (200, 360), (1020, 650), (545, 731)}
             self.blue_gems = {(60, 130), (700, 390), (550, 556), (775, 731)}
             self.box = None
@@ -298,11 +340,25 @@ class FireWaterEnv(MultiAgentEnv):
         fire_rect = self._rect(self.fire)
         water_rect = self._rect(self.water)
         for hazard in self.hazards:
-            if hazard.kind in ("water", "poison") and fire_rect.colliderect(hazard.rect):
+            if hazard.kind in LETHAL_HAZARDS[FIREBOY] and fire_rect.colliderect(hazard.rect):
                 return True
-            if hazard.kind in ("fire", "poison") and water_rect.colliderect(hazard.rect):
+            if hazard.kind in LETHAL_HAZARDS[WATERGIRL] and water_rect.colliderect(hazard.rect):
                 return True
         return False
+
+    def _death_agent(self, player: PlayerState, lethal_kinds: set[str]) -> bool:
+        rect = self._rect(player)
+        return any(hazard.kind in lethal_kinds and rect.colliderect(hazard.rect) for hazard in self.hazards)
+
+    def _hazard_proximity_penalty(self, player: PlayerState, lethal_kinds: set[str]) -> float:
+        rect = self._rect(player)
+        penalty = 0.0
+        for hazard in self.hazards:
+            if hazard.kind in lethal_kinds:
+                dist = math.hypot(rect.centerx - hazard.rect.centerx, rect.centery - hazard.rect.centery)
+                if dist < 200:
+                    penalty += (1.0 - dist / 200.0) * 0.1
+        return penalty
 
     def _both_idle(self, action_dict: dict[str, int]) -> bool:
         return int(action_dict.get(FIREBOY, ACTION_NOOP)) == ACTION_NOOP and int(action_dict.get(WATERGIRL, ACTION_NOOP)) == ACTION_NOOP
@@ -324,7 +380,8 @@ class FireWaterEnv(MultiAgentEnv):
         other = self.water if agent == FIREBOY else self.fire
         own_door = self.fire_door if agent == FIREBOY else self.water_door
         other_door = self.water_door if agent == FIREBOY else self.fire_door
-        nearest_hazard = self._nearest_hazard(own)
+        lethal_for_own = LETHAL_HAZARDS[agent]
+        nearest_hazard = self._nearest_hazard(own, lethal_for_own)
         box = self.box or pygame.Rect(0, 0, 0, 0)
         red_total = 6 if self.level == 2 else 4
         blue_total = 6 if self.level == 2 else 4
@@ -354,11 +411,12 @@ class FireWaterEnv(MultiAgentEnv):
     def _unit_velocity_y(self, velocity: float) -> float:
         return float(np.clip((velocity / 15.0 + 1.0) / 2.0, 0.0, 1.0))
 
-    def _nearest_hazard(self, player: PlayerState) -> tuple[float, float]:
-        if not self.hazards:
+    def _nearest_hazard(self, player: PlayerState, lethal_kinds: set[str] | None = None) -> tuple[float, float]:
+        hazards = [h for h in self.hazards if lethal_kinds is None or h.kind in lethal_kinds]
+        if not hazards:
             return 0.0, 0.0
         rect = self._rect(player)
-        hazard = min(self.hazards, key=lambda item: math.hypot(rect.centerx - item.rect.centerx, rect.centery - item.rect.centery))
+        hazard = min(hazards, key=lambda item: math.hypot(rect.centerx - item.rect.centerx, rect.centery - item.rect.centery))
         return float(hazard.rect.centerx), float(hazard.rect.centery)
 
     def _rect(self, player: PlayerState) -> pygame.Rect:

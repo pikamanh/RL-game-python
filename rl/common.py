@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ.setdefault("PYTORCH_JIT", "0")
 
 import numpy as np
 import ray
@@ -50,7 +55,7 @@ def build_ppo_config(args: Any) -> PPOConfig:
             lambda_=args.gae_lambda,
             entropy_coeff=args.entropy_coeff,
             clip_param=args.clip_param,
-            train_batch_size=args.train_batch_size,
+            train_batch_size=args.batch_size,
             minibatch_size=args.minibatch_size,
             num_epochs=args.num_epochs,
         )
@@ -111,13 +116,18 @@ def load_algorithm(checkpoint: str) -> Algorithm:
 
 def build_inference_algorithm(args: Any) -> Algorithm:
     defaults = {
+        "level": 1,
+        "max_steps": 3000,
+        "step_size": 5.0,
+        "gravity": 0.55,
+        "jump_velocity": 8.0,
         "framework": "torch",
         "lr": 3e-4,
         "gamma": 0.99,
         "gae_lambda": 0.95,
         "entropy_coeff": 0.02,
         "clip_param": 0.2,
-        "train_batch_size": 4096,
+        "batch_size": 4096,
         "minibatch_size": 512,
         "num_epochs": 10,
         "num_workers": 0,

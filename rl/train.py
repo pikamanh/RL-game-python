@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--entropy-coeff", type=float, default=0.02)
     parser.add_argument("--clip-param", type=float, default=0.2)
-    parser.add_argument("--train-batch-size", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--num-epochs", type=int, default=10)
     parser.add_argument("--batch-mode", choices=["complete_episodes", "truncate_episodes"], default="complete_episodes")
@@ -72,6 +72,10 @@ def zip_checkpoints(checkpoint_dir: Path, zip_path: Path | None) -> Path:
         zip_path = checkpoint_dir.with_suffix(".zip")
     else:
         zip_path = zip_path.expanduser().resolve()
+        if zip_path.is_dir():
+            zip_path = checkpoint_dir.with_suffix(".zip") if zip_path == checkpoint_dir else zip_path / f"{checkpoint_dir.name}.zip"
+        elif zip_path.suffix.lower() != ".zip":
+            zip_path = zip_path.with_suffix(".zip")
 
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     archive_base = zip_path.with_suffix("")
