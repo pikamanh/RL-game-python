@@ -10,6 +10,7 @@ except ImportError:
     from common import compute_action, ensure_ray, load_algorithm, load_algorithm_from_weights
     from env import AGENTS, FireWaterEnv
 
+# python3 rl/eval.py --render --level 1 --checkpoint checkpoints/best/
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a trained Fireboy/Watergirl multi-agent checkpoint.")
@@ -21,6 +22,7 @@ def parse_args():
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--sleep", type=float, default=0.0)
     parser.add_argument("--explore", action="store_true")
+    parser.add_argument("--rl-realtime", action="store_true")
     parser.add_argument("--shared-policy", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--step-size", type=float, default=5.0)
     parser.add_argument("--gravity", type=float, default=0.55)
@@ -43,6 +45,7 @@ def main():
             total_reward = 0.0
             done = False
             info = {}
+            step_count = 0
             while not done:
                 actions = {
                     agent: compute_action(algo, obs[agent], agent, args.shared_policy, explore=args.explore)
@@ -52,10 +55,15 @@ def main():
                 total_reward += sum(rewards.values()) / len(rewards)
                 done = terminateds["__all__"] or truncateds["__all__"]
                 info = infos[AGENTS[0]]
+                step_count += 1
+                if args.rl_realtime:
+                    print(f"\rstep={step_count}", end="", flush=True)
                 if args.render:
                     env.render()
                 if args.sleep > 0:
                     time.sleep(args.sleep)
+            if args.rl_realtime:
+                print()
             wins += int(bool(info.get("win")))
             print(
                 f"episode={episode} reward={total_reward:.3f} "

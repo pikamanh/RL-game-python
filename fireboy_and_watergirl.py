@@ -4,7 +4,7 @@ import os
 import pygame,time
 import sys
 
-from rl.geometry import FIREBOY, WATERGIRL, is_lethal_hazard, make_hazard_rects
+from rl.geometry import FIREBOY, PLAYER_HAZARD_INSETS, WATERGIRL, is_lethal_hazard, make_hazard_rects
 
 os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
@@ -24,6 +24,18 @@ _RL_KEYS = set()
 _RL_ALGO = None
 _RL_ENV = None
 _RL_PREV_POS = None
+_FIRE_STEP_COUNT = 0
+_WATER_STEP_COUNT = 0
+
+def make_player_hitbox(agent, x_pos, y_pos, image):
+    left, top, right, bottom = PLAYER_HAZARD_INSETS[agent]
+    visual_rect = image.get_bounding_rect()
+    return pygame.Rect(
+        int(x_pos) + visual_rect.x + left,
+        int(y_pos) + visual_rect.y + top,
+        max(1, visual_rect.width - left - right),
+        max(1, visual_rect.height - top - bottom),
+    )
 
 
 class _RLKeyState:
@@ -193,6 +205,15 @@ while running1:
         fire_lake = pygame.image.load("o11.png")
         water_lake = pygame.image.load("o21.png")
         green_lake = pygame.image.load("o31.png")
+        level1_hazard_images = {
+            "fire": fire_lake,
+            "water": water_lake,
+            "poison": green_lake,
+        }
+        level1_hazard_sprites = [
+            (hazard_kind, hazard_rect, pygame.transform.scale(level1_hazard_images[hazard_kind], hazard_rect.size))
+            for hazard_kind, hazard_rect in make_hazard_rects(1)
+        ]
         hero_boy = pygame.image.load("hero_boy/stand1.png")
         hero_girl = pygame.image.load("hero_girl/stand1.png")
         red_jewel = pygame.image.load("red_jewel.png")
@@ -235,16 +256,18 @@ while running1:
         jump_velocity, jump_velocity1= 8,8 
 # تعريف المنصات
         platforms = [
-            pygame.Rect(0, 792, 1100, 10),pygame.Rect(10, 680, 350, 20),pygame.Rect(190, 424, 365, 20), pygame.Rect(1020, 710, 50, 20), 
+            pygame.Rect(0, 792, 1100, 10),pygame.Rect(10, 680, 270, 20),pygame.Rect(190, 424, 365, 20), pygame.Rect(1020, 710, 50, 20), 
             pygame.Rect(10, 200, 140, 140), pygame.Rect(505, 623, 425, 20),pygame.Rect(10, 540, 70, 20), pygame.Rect(150, 310, 790, 20),
             pygame.Rect(435, 168, 610, 20),pygame.Rect(572, 453, 510, 20), pygame.Rect(10, 568, 460, 20), pygame.Rect(247, 115, 113, 20), 
             pygame.Rect(570, 263, 185, 20),pygame.Rect(132, 454, 50, 20),pygame.Rect(390, 145, 35, 70), ]
+        level1_visual_gaps = [pygame.Rect(280, 680, 85, 26)]
 # الأبواب
         fireboy_door_rect = pygame.Rect(910, 85, fireboy_door.get_width(), fireboy_door.get_height())
         watergirl_door_rect = pygame.Rect(995, 85, watergirl_door.get_width(), watergirl_door.get_height())
         fireboy_door_opened = False 
         watergirl_door_opened = False  
         arm_opened=False
+        arm_was_pressed = False
         hero_girl_rect = pygame.Rect(o, p, hero_girl.get_width(), hero_girl.get_height())
         hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
         pygame.mixer.music.play(loops=-1)
@@ -254,7 +277,7 @@ while running1:
         font = pygame.font.Font(None, 60)
         on_platform=False
         def moving_fire():
-            global left, right, moves, x, y, jump_velocity, is_jumping,on_platform_fireboy
+            global left, right, moves, x, y, jump_velocity, is_jumping, on_platform_fireboy, _FIRE_STEP_COUNT
             keys = get_current_keys()
             hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
             on_platform_fireboy = False
@@ -263,6 +286,7 @@ while running1:
                     is_jumping = True
                     jump_velocity = 8
                     channel1.play(jump_boy)
+                    _FIRE_STEP_COUNT += 1
             else:
                 y -= jump_velocity
                 jump_velocity -= gravity
@@ -271,11 +295,13 @@ while running1:
                 left = True
                 right = False
                 moves = (moves + 1) % len(move_left)
+                _FIRE_STEP_COUNT += 1
             elif keys[pygame.K_RIGHT] and x + width + step < WIDTH:
                 x += step
                 right = True
                 left = False
                 moves = (moves + 1) % len(move_right)
+                _FIRE_STEP_COUNT += 1
             else:
                 right = False
                 left = False
@@ -295,7 +321,7 @@ while running1:
                 y += gravity
                 is_jumping = True
         def moving_girl():
-            global left1, right1, o, p, jump_velocity1, is_jumping1, moves1,on_platform_watergirl
+            global left1, right1, o, p, jump_velocity1, is_jumping1, moves1, on_platform_watergirl, _WATER_STEP_COUNT
             keys = get_current_keys()
             hero_girl_rect = pygame.Rect(o, p, hero_girl.get_width(), hero_girl.get_height())
             on_platform_watergirl = False
@@ -304,6 +330,7 @@ while running1:
                     channel3.play(jump_girl)
                     is_jumping1 = True
                     jump_velocity1 = 8
+                    _WATER_STEP_COUNT += 1
             else:
                 p -= jump_velocity1
                 jump_velocity1 -= gravity1
@@ -312,11 +339,13 @@ while running1:
                 left1 = True
                 right1 = False
                 moves1 = (moves1 + 1) % len(move_left1)
+                _WATER_STEP_COUNT += 1
             elif keys[pygame.K_d] and o + width1 + step < WIDTH:
                 o += step
                 right1 = True
                 left1 = False
                 moves1 = (moves1 + 1) % len(move_right1)
+                _WATER_STEP_COUNT += 1
             else:
                 right1 = False
                 left1 = False
@@ -324,31 +353,33 @@ while running1:
             for platform in platforms:
                 if hero_girl_rect.colliderect(platform):
                     if hero_girl_rect.bottom >= platform.top and hero_girl_rect.top < platform.top:
-                        p = platform.top - hero_girl.get_height() 
+                        p = platform.top - hero_girl.get_height()
                         is_jumping1 = False
                         jump_velocity1 = 0
                         on_platform_watergirl = True
                         break
                     elif hero_girl_rect.top <= platform.bottom and hero_girl_rect.bottom > platform.bottom:
-                        p = platform.bottom + 5 
+                        p = platform.bottom + 5
                         break
             if not on_platform_watergirl and not is_jumping1:
                 p += gravity1
                 is_jumping1 = True
-        def draw_fireboy():
+        def current_fireboy_image():
             if left:
-             screen.blit(move_left[moves], (x, y))
-            elif right:
-                screen.blit(move_right[moves], (x, y))
-            else:
-                screen.blit(hero_boy, (x, y))
-        def draw_watergirl():
+                return move_left[moves]
+            if right:
+                return move_right[moves]
+            return hero_boy
+        def current_watergirl_image():
             if left1:
-                screen.blit(move_left1[moves1], (o, p))
-            elif right1:
-                screen.blit(move_right1[moves1], (o, p))
-            else:
-                screen.blit(hero_girl, (o, p))
+                return move_left1[moves1]
+            if right1:
+                return move_right1[moves1]
+            return hero_girl
+        def draw_fireboy():
+            screen.blit(current_fireboy_image(), (x, y))
+        def draw_watergirl():
+            screen.blit(current_watergirl_image(), (o, p))
         def gems():
             global fireboy_score,watergirl_score
             hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
@@ -373,14 +404,14 @@ while running1:
 # الحلقة الرئيسية
         def play():
             global x, y, o, p,red_gems, blue_gems, gem_size,left, left1, right, right1, moves, moves1,on_platform_watergirl
-            global fireboy_score, watergirl_score,fireboy_door_opened, watergirl_door_opened,arm_opened, on_platform_fireboy,current_screen
+            global fireboy_score, watergirl_score,fireboy_door_opened, watergirl_door_opened,arm_opened, arm_was_pressed, on_platform_fireboy,current_screen
             global is_jumping, is_jumping1, jump_velocity1, jump_velocity,timer_running,total_blue_gems,total_red_gems
 
             def reset_level1_for_rl():
                 global x, y, o, p, red_gems, blue_gems, left, left1, right, right1, moves, moves1
-                global fireboy_score, watergirl_score, fireboy_door_opened, watergirl_door_opened, arm_opened
+                global fireboy_score, watergirl_score, fireboy_door_opened, watergirl_door_opened, arm_opened, arm_was_pressed
                 global is_jumping, is_jumping1, jump_velocity, jump_velocity1, timer_running, start_time
-                global _RL_PREV_POS, _RL_KEYS
+                global _RL_PREV_POS, _RL_KEYS, _FIRE_STEP_COUNT, _WATER_STEP_COUNT
                 x, y = 60, 790
                 o, p = 60, 620
                 left = right = left1 = right1 = False
@@ -390,12 +421,34 @@ while running1:
                 fireboy_score = watergirl_score = 0
                 fireboy_door_opened = watergirl_door_opened = False
                 arm_opened = False
+                arm_was_pressed = False
                 red_gems = [(290, 50), (200, 360), (1020, 650), (545, 731)]
                 blue_gems = [(60, 130), (700, 390), (550, 556), (775, 731)]
                 timer_running = True
                 start_time = pygame.time.get_ticks()
                 _RL_PREV_POS = None
                 _RL_KEYS = set()
+                _FIRE_STEP_COUNT = 0
+                _WATER_STEP_COUNT = 0
+
+            def wait_for_level1_retry():
+                screen.blit(game_over, (145, 170))
+                pygame.display.flip()
+                channel2.play(end_s)
+                while True:
+                    for retry_event in pygame.event.get():
+                        if retry_event.type == pygame.QUIT:
+                            pygame.quit()
+                            sys.exit()
+                        if retry_event.type == pygame.KEYDOWN and retry_event.key in (pygame.K_r, pygame.K_RETURN, pygame.K_SPACE):
+                            reset_level1_for_rl()
+                            pygame.mixer.music.play(loops=-1)
+                            return
+                        if retry_event.type == pygame.MOUSEBUTTONDOWN:
+                            reset_level1_for_rl()
+                            pygame.mixer.music.play(loops=-1)
+                            return
+                    pygame.time.delay(30)
 
             running = True
             while running:
@@ -413,9 +466,10 @@ while running1:
                     pygame.draw.rect(screen, BROWN, platform)
                 screen.blit(back_ground, (0, 0)) 
                 screen.blit(road1, (0, 0))
-                screen.blit(fire_lake, (510, 790))
-                screen.blit(water_lake, (742, 790))
-                screen.blit(green_lake, (684, 617))
+                for visual_gap in level1_visual_gaps:
+                    pygame.draw.rect(screen, (35, 39, 13), visual_gap)
+                for _, hazard_rect, hazard_image in level1_hazard_sprites:
+                    screen.blit(hazard_image, hazard_rect.topleft)
                 screen.blit(button, (300, 406))
                 screen.blit(button1, (850, 294))
                 
@@ -433,20 +487,21 @@ while running1:
                     screen.blit(watergirl_door_open, (995, 85))  
                 else:
                     screen.blit(watergirl_door, (995, 85))  
-                draw_fireboy()
-                draw_watergirl()
                 gems()
                 draw_gems()
                 hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
                 hero_girl_rect = pygame.Rect(o, p, hero_girl.get_width(), hero_girl.get_height())
-                if not arm_opened:  
+                arm_rect = pygame.Rect(270, 520, arm.get_width(), arm.get_height()-5)
+                arm_pressed = hero_boy_rect.colliderect(arm_rect) or hero_girl_rect.colliderect(arm_rect)
+                if arm_pressed and not arm_was_pressed:
+                    arm_open.play()
+                    arm_opened = not arm_opened
+                arm_was_pressed = arm_pressed
+
+                if not arm_opened:
                     screen.blit(v_gate,(155,475))
                     screen.blit(arm, (270, 525))
-                    arm_rect = pygame.Rect(270, 520, arm.get_width(), arm.get_height()-5)
-                if hero_boy_rect.colliderect(arm_rect) or hero_girl_rect.colliderect(arm_rect):
-                    arm_open.play()
-                    arm_opened = True  
-                if arm_opened:
+                else:
                     screen.blit(open_arm, (260, 515))  
                     screen.blit(v_gate_open,(155,497+v_gate.get_height()))  
                 button_rect = pygame.Rect(300, 406, button.get_width(), button.get_height())
@@ -477,12 +532,26 @@ while running1:
                         on_platform_watergirl = True    
                 if not on_platform_watergirl and not is_jumping1:
                     p += gravity1
-                    is_jumping1 = True             
+                    is_jumping1 = True
+                fireboy_image = current_fireboy_image()
+                watergirl_image = current_watergirl_image()
+                draw_fireboy()
+                draw_watergirl()
             # المناطق القاتلة
                 hazard_rects = make_hazard_rects(1)
-                fire_lake_rect1 = pygame.Rect(510, 783, fire_lake.get_width()-20, fire_lake.get_height()-16)
-                water_lake_rect1 = pygame.Rect(742, 783, water_lake.get_width()-20, water_lake.get_height()-16)
-                player_hazards = ((FIREBOY, hero_boy_rect), (WATERGIRL, hero_girl_rect))
+                hazard_rects_by_kind = dict(hazard_rects)
+                fireboy_hazard_rect = make_player_hitbox(FIREBOY, x, y, fireboy_image)
+                watergirl_hazard_rect = make_player_hitbox(WATERGIRL, o, p, watergirl_image)
+                for hazard_kind, hazard_rect in hazard_rects:
+                    hazard_color = {
+                        "fire": (255, 70, 30),
+                        "water": (40, 150, 255),
+                        "poison": (40, 230, 80),
+                    }[hazard_kind]
+                    pygame.draw.rect(screen, hazard_color, hazard_rect, 2)
+                pygame.draw.rect(screen, WHITE, fireboy_hazard_rect, 2)
+                pygame.draw.rect(screen, WHITE, watergirl_hazard_rect, 2)
+                player_hazards = ((FIREBOY, fireboy_hazard_rect), (WATERGIRL, watergirl_hazard_rect))
                 if any(
                     player_rect.colliderect(hazard_rect) and is_lethal_hazard(agent, hazard_kind)
                     for agent, player_rect in player_hazards
@@ -493,23 +562,25 @@ while running1:
                         continue
                     timer_running = False
                     pygame.mixer.music.stop()
-                    channel2.play(end_s)
-                    time.sleep(end_s.get_length())
-                    screen.blit(game_over,(145,170))
-                    running=False   
-                if hero_girl_rect.colliderect(water_lake_rect1) or hero_boy_rect.colliderect(fire_lake_rect1) :  
+                    wait_for_level1_retry()
+                    continue
+                if watergirl_hazard_rect.colliderect(hazard_rects_by_kind["water"]) or fireboy_hazard_rect.colliderect(hazard_rects_by_kind["fire"]) :  
                     water_s.play()
             #التايمر
                 if timer_running:
                     current_time = pygame.time.get_ticks()
-                    elapsed_time = (current_time - start_time) // 1000  
-                    minutes = elapsed_time // 60  
+                    elapsed_time = (current_time - start_time) // 1000
+                    minutes = elapsed_time // 60
                     seconds = elapsed_time % 60
                     timer_text = font.render(f" {minutes:02}:{seconds:02}", True, YELLOW)
                     screen.blit(timer_text, (480, 0))
+                fire_step_text = font.render(f"Fire: {_FIRE_STEP_COUNT}", True, (255, 100, 50))
+                water_step_text = font.render(f"Water: {_WATER_STEP_COUNT}", True, (100, 180, 255))
+                screen.blit(fire_step_text, (0, 0))
+                screen.blit(water_step_text, (0, 40))
                 if elapsed_time>60:
                         pygame.mixer.music.stop()
-                        speed_s.play()       
+                        speed_s.play()
             #شاشة الفوز    
                 if fireboy_door_opened and watergirl_door_opened:
                     channel1.play(pathing_through_door)
@@ -678,7 +749,7 @@ while running1:
             if box_rect.x + box_rect.width > WIDTH:
                         box_rect.x = WIDTH - box_rect.width
         def moving_fire():
-            global left, right, moves, x, y, jump_velocity, is_jumping
+            global left, right, moves, x, y, jump_velocity, is_jumping, _FIRE_STEP_COUNT
             keys = get_current_keys()
             hero_boy_rect = pygame.Rect(x, y, hero_boy.get_width(), hero_boy.get_height())
             on_platform_fireboy = False
@@ -687,6 +758,7 @@ while running1:
                     is_jumping = True
                     jump_velocity = 8
                     channel1.play(jump_boy)
+                    _FIRE_STEP_COUNT += 1
             else:
                 y -= jump_velocity
                 jump_velocity -= gravity
@@ -695,11 +767,13 @@ while running1:
                 left = True
                 right = False
                 moves = (moves + 1) % len(move_left)
+                _FIRE_STEP_COUNT += 1
             elif keys[pygame.K_RIGHT] and x + width + step < WIDTH:
                 x += step
                 right = True
                 left = False
                 moves = (moves + 1) % len(move_right)
+                _FIRE_STEP_COUNT += 1
             else:
                 right = False
                 left = False
@@ -719,7 +793,7 @@ while running1:
                 y += gravity
                 is_jumping = True
         def moving_girl():
-            global left1, right1, o, p, jump_velocity1, is_jumping1, moves1
+            global left1, right1, o, p, jump_velocity1, is_jumping1, moves1, _WATER_STEP_COUNT
             keys = get_current_keys()
             hero_girl_rect = pygame.Rect(o, p, hero_girl.get_width(), hero_girl.get_height())
             on_platform_watergirl = False
@@ -728,6 +802,7 @@ while running1:
                     channel3.play(jump_girl)
                     is_jumping1 = True
                     jump_velocity1 = 8
+                    _WATER_STEP_COUNT += 1
             else:
                 p -= jump_velocity1
                 jump_velocity1 -= gravity1
@@ -736,11 +811,13 @@ while running1:
                 left1 = True
                 right1 = False
                 moves1 = (moves1 + 1) % len(move_left1)
+                _WATER_STEP_COUNT += 1
             elif keys[pygame.K_d] and o + width1 + step < WIDTH:
                 o += step
                 right1 = True
                 left1 = False
                 moves1 = (moves1 + 1) % len(move_right1)
+                _WATER_STEP_COUNT += 1
             else:
                 right1 = False
                 left1 = False
@@ -984,11 +1061,15 @@ while running1:
                 font = pygame.font.Font(None, 60)
                 if timer_running:
                     current_time = pygame.time.get_ticks()
-                    elapsed_time = (current_time - start_time) // 1000 
-                    minutes = elapsed_time // 60  
+                    elapsed_time = (current_time - start_time) // 1000
+                    minutes = elapsed_time // 60
                     seconds = elapsed_time % 60
                     timer_text = font.render(f" {minutes:02}:{seconds:02}", True, YELLOW)
                     screen.blit(timer_text, (490, 0))
+                fire_step_text = font.render(f"Fire: {_FIRE_STEP_COUNT}", True, (255, 100, 50))
+                water_step_text = font.render(f"Water: {_WATER_STEP_COUNT}", True, (100, 180, 255))
+                screen.blit(fire_step_text, (0, 0))
+                screen.blit(water_step_text, (0, 40))
                 if elapsed_time>60:
                     pygame.mixer.music.stop()
                     speed_s.play()               

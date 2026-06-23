@@ -10,6 +10,7 @@ try:
 except ImportError:
     from common import build_ppo_config, ensure_ray, save_policy_weights
 
+# python3 rl/train.py --level 1 --num-workers 8 --num-gpus 1 --lr 1e-4 --entropy-coeff 0.005 --batch-size 8192 --minibatch-size 512 --checkpoint-every 25
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train MAPPO-style multi-agent PPO for Fireboy and Watergirl.")
@@ -60,6 +61,23 @@ def metric(result, *paths, default=float("nan")):
 
 def is_number(value):
     return isinstance(value, (int, float)) and not math.isnan(float(value))
+
+
+def metric_text(value, precision=3):
+    return f"{value:.{precision}f}" if is_number(value) else "pending"
+
+
+def custom_metric(result, name, default=float("nan")):
+    return metric(
+        result,
+        ("custom_metrics", f"{name}_mean"),
+        ("custom_metrics", name),
+        ("env_runners", "custom_metrics", f"{name}_mean"),
+        ("env_runners", "custom_metrics", name),
+        ("env_runners", "custom_metrics", name, "mean"),
+        ("env_runners", name),
+        default=default,
+    )
 
 
 def checkpoint_path(checkpoint):
@@ -125,11 +143,42 @@ def main():
                 ("env_runners", "num_episodes"),
                 default=0,
             )
-            reward_text = f"{reward_mean:.3f}" if is_number(reward_mean) else "pending"
-            length_text = f"{length_mean:.1f}" if is_number(length_mean) else "pending"
+            win_rate = custom_metric(result, "win_rate")
+            death_rate = custom_metric(result, "death_rate")
+            fire_died_rate = custom_metric(result, "fire_died_rate")
+            water_died_rate = custom_metric(result, "water_died_rate")
+            truncated_rate = custom_metric(result, "truncated_rate")
+            gem_count = custom_metric(result, "gem_count")
+            checkpoint_count = custom_metric(result, "checkpoint_count")
+            fire_checkpoint_count = custom_metric(result, "fire_checkpoint_count")
+            water_checkpoint_count = custom_metric(result, "water_checkpoint_count")
+            team_checkpoint_count = custom_metric(result, "team_checkpoint_count")
+            team_gap = custom_metric(result, "team_gap")
+            max_fire_x = custom_metric(result, "max_fire_x")
+            max_water_x = custom_metric(result, "max_water_x")
+            water_cleared_fire_pool = custom_metric(result, "water_cleared_fire_pool_rate")
+            steps_since_team_checkpoint = custom_metric(result, "steps_since_team_checkpoint")
+            stage_stall_penalty = custom_metric(result, "stage_stall_penalty")
+            water_fire_edge_penalty = custom_metric(result, "water_fire_edge_penalty")
+            fire_final_x = custom_metric(result, "fire_final_x")
+            fire_final_y = custom_metric(result, "fire_final_y")
+            water_final_x = custom_metric(result, "water_final_x")
+            water_final_y = custom_metric(result, "water_final_y")
             print(
-                f"iter={iteration} reward_mean={reward_text} "
-                f"episode_len_mean={length_text} episodes={episodes_this_iter}"
+                f"iter={iteration} reward_mean={metric_text(reward_mean)} "
+                f"episode_len_mean={metric_text(length_mean, 1)} episodes={episodes_this_iter} "
+                f"win_rate={metric_text(win_rate)} death_rate={metric_text(death_rate)} "
+                f"fire_died={metric_text(fire_died_rate)} water_died={metric_text(water_died_rate)} "
+                f"truncated_rate={metric_text(truncated_rate)} gem_count={metric_text(gem_count, 2)} "
+                f"checkpoint_count={metric_text(checkpoint_count, 2)} "
+                f"fire_cp={metric_text(fire_checkpoint_count, 2)} water_cp={metric_text(water_checkpoint_count, 2)} "
+                f"team_cp={metric_text(team_checkpoint_count, 2)} team_gap={metric_text(team_gap, 1)} "
+                f"max_fire_x={metric_text(max_fire_x, 1)} max_water_x={metric_text(max_water_x, 1)} "
+                f"water_clear={metric_text(water_cleared_fire_pool)} "
+                f"team_stall={metric_text(steps_since_team_checkpoint, 0)} stall_pen={metric_text(stage_stall_penalty, 3)} "
+                f"edge_pen={metric_text(water_fire_edge_penalty, 3)} "
+                f"fire_final=({metric_text(fire_final_x, 1)},{metric_text(fire_final_y, 1)}) "
+                f"water_final=({metric_text(water_final_x, 1)},{metric_text(water_final_y, 1)})"
             )
 
             if args.save_best and is_number(reward_mean) and reward_mean > best_reward:

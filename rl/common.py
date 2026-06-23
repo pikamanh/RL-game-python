@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ os.environ.setdefault("PYTORCH_JIT", "0")
 
 import numpy as np
 import ray
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from gymnasium import spaces
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -25,6 +27,39 @@ except ImportError:
 
 
 ENV_NAME = "firewater_multi_agent"
+
+
+def _install_checkpoint_module_aliases() -> None:
+    """Keep older RLlib checkpoints loadable after moving code under rl/."""
+    current_module = sys.modules[__name__]
+    sys.modules.setdefault("common", current_module)
+
+    try:
+        from . import env as env_module
+        from . import geometry as geometry_module
+    except ImportError:
+        import env as env_module
+        import geometry as geometry_module
+
+    sys.modules.setdefault("env", env_module)
+    sys.modules.setdefault("geometry", geometry_module)
+
+
+class FireWaterCallbacks(DefaultCallbacks):
+    def on_episode_end(self, *, episode, metrics_logger=None, env=None, base_env=None, env_index=0, **kwargs) -> None:
+        if env is None and base_env is not None:
+            try:
+                env = base_env.get_sub_environments()[env_index]
+            except (AttributeError, IndexError, TypeError):
+                env = None
+        metrics = getattr(env, "last_episode_metrics", None)
+        if not metrics:
+            return
+        for key, value in metrics.items():
+            if metrics_logger is not None:
+                metrics_logger.log_value(("custom_metrics", key), value, reduce="mean")
+            elif hasattr(episode, "custom_metrics"):
+                episode.custom_metrics[key] = value
 
 
 def register_firewater_env():
@@ -64,6 +99,7 @@ def build_ppo_config(args: Any) -> PPOConfig:
             policy_mapping_fn=_policy_mapping_fn(args.shared_policy),
             policies_to_train=None,
         )
+        .callbacks(FireWaterCallbacks)
     )
 
     try:
@@ -101,6 +137,7 @@ def ensure_ray(local_mode: bool = False):
 
 def load_algorithm(checkpoint: str) -> Algorithm:
     register_firewater_env()
+    _install_checkpoint_module_aliases()
     checkpoint_path = Path(checkpoint).expanduser().resolve()
     try:
         return Algorithm.from_checkpoint(str(checkpoint_path))

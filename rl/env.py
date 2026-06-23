@@ -10,9 +10,9 @@ import pygame
 from gymnasium import spaces
 
 try:
-    from .geometry import LETHAL_HAZARDS, make_hazard_rects
+    from .geometry import LETHAL_HAZARDS, PLAYER_HAZARD_INSETS, make_hazard_rects
 except ImportError:
-    from geometry import LETHAL_HAZARDS, make_hazard_rects
+    from geometry import LETHAL_HAZARDS, PLAYER_HAZARD_INSETS, make_hazard_rects
 
 try:
     from ray.rllib.env.multi_agent_env import MultiAgentEnv
@@ -36,6 +36,13 @@ ACTION_RIGHT_JUMP = 5
 class Hazard:
     rect: pygame.Rect
     kind: str
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    name: str
+    rect: pygame.Rect
+    reward: float = 5.0
 
 
 @dataclass
@@ -88,8 +95,24 @@ class FireWaterEnv(MultiAgentEnv):
         self.red_gems: set[tuple[int, int]] = set()
         self.blue_gems: set[tuple[int, int]] = set()
         self.arm_opened = False
+        self.arm_was_pressed = False
         self.button_opened = False
         self.box: pygame.Rect | None = None
+        self._fire_idle_steps = 0
+        self._water_idle_steps = 0
+        self._fire_checkpoints: set[str] = set()
+        self._water_checkpoints: set[str] = set()
+        self._team_checkpoints: set[str] = set()
+        self._fire_checkpoint_zones: list[Checkpoint] = []
+        self._water_checkpoint_zones: list[Checkpoint] = []
+        self._episode_red_gems_collected = 0
+        self._episode_blue_gems_collected = 0
+        self._max_fire_x = 0.0
+        self._max_water_x = 0.0
+        self._last_team_checkpoint_count = 0
+        self._steps_since_team_checkpoint = 0
+        self._water_fire_edge_steps = 0
+        self.last_episode_metrics: dict[str, float] = {}
         self._load_level()
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
@@ -102,8 +125,22 @@ class FireWaterEnv(MultiAgentEnv):
 
         self.steps = 0
         self.arm_opened = False
+        self.arm_was_pressed = False
         self.button_opened = False
+        self._fire_idle_steps = 0
+        self._water_idle_steps = 0
+        self._fire_checkpoints = set()
+        self._water_checkpoints = set()
+        self._team_checkpoints = set()
+        self._episode_red_gems_collected = 0
+        self._episode_blue_gems_collected = 0
+        self.last_episode_metrics = {}
         self._load_level()
+        self._max_fire_x = self.fire.x
+        self._max_water_x = self.water.x
+        self._last_team_checkpoint_count = 0
+        self._steps_since_team_checkpoint = 0
+        self._water_fire_edge_steps = 0
         self.last_fire_dist = self._distance_to_rect(self.fire, self.fire_door)
         self.last_water_dist = self._distance_to_rect(self.water, self.water_door)
         self._fire_door_rewarded = False
@@ -118,17 +155,65 @@ class FireWaterEnv(MultiAgentEnv):
         old_water_dist = self.last_water_dist
         old_red_count = len(self.red_gems)
         old_blue_count = len(self.blue_gems)
+        prev_fire_x = self.fire.x
+        prev_water_x = self.water.x
+        old_max_water_x = self._max_water_x
+        old_team_min_x = min(prev_fire_x, prev_water_x)
 
         self._apply_player_action(self.fire, int(action_dict.get(FIREBOY, ACTION_NOOP)))
         self._apply_player_action(self.water, int(action_dict.get(WATERGIRL, ACTION_NOOP)))
         self._update_box()
         self._update_mechanisms()
         self._collect_gems()
+        self._episode_red_gems_collected += old_red_count - len(self.red_gems)
+        self._episode_blue_gems_collected += old_blue_count - len(self.blue_gems)
         self._update_doors()
+        self._max_fire_x = max(self._max_fire_x, self.fire.x)
+        self._max_water_x = max(self._max_water_x, self.water.x)
+
+        # Per-agent idle tracking (x-axis only; jumping in place is caught here)
+        if abs(self.fire.x - prev_fire_x) < 5.0:
+            self._fire_idle_steps += 1
+        else:
+            self._fire_idle_steps = 0
+        if abs(self.water.x - prev_water_x) < 5.0:
+            self._water_idle_steps += 1
+        else:
+            self._water_idle_steps = 0
+        if 500.0 <= self.water.x <= 535.0 and "cleared_fire_pool" not in self._water_checkpoints:
+            self._water_fire_edge_steps += 1
+        else:
+            self._water_fire_edge_steps = 0
+        _IDLE_THRESHOLD = 30
+        fire_idle_pen = 0.05 if self._fire_idle_steps > _IDLE_THRESHOLD else 0.0
+        water_idle_pen = 0.05 if self._water_idle_steps > _IDLE_THRESHOLD else 0.0
+
+        fire_checkpoint = 0.0
+        water_checkpoint = 0.0
+        team_checkpoint = 0.0
 
         death = self._death()
+        fire_died = self._death_agent(self.fire, LETHAL_HAZARDS[FIREBOY]) if death else False
+        water_died = self._death_agent(self.water, LETHAL_HAZARDS[WATERGIRL]) if death else False
         win = self.fire.door_opened and self.water.door_opened
         truncated = self.steps >= self.max_steps
+
+        if not death:
+            old_fire_checkpoints = len(self._fire_checkpoints)
+            old_water_checkpoints = len(self._water_checkpoints)
+            fire_checkpoint = self._checkpoint_bonus(self.fire, self._fire_checkpoint_zones, self._fire_checkpoints)
+            water_checkpoint = self._checkpoint_bonus(self.water, self._water_checkpoint_zones, self._water_checkpoints)
+            fire_checkpoint_count = len(self._fire_checkpoints) - old_fire_checkpoints
+            water_checkpoint_count = len(self._water_checkpoints) - old_water_checkpoints
+            team_checkpoint = self._team_checkpoint_bonus()
+            if len(self._team_checkpoints) > self._last_team_checkpoint_count:
+                self._last_team_checkpoint_count = len(self._team_checkpoints)
+                self._steps_since_team_checkpoint = 0
+            else:
+                self._steps_since_team_checkpoint += 1
+        else:
+            fire_checkpoint_count = 0
+            water_checkpoint_count = 0
 
         new_fire_dist = self._distance_to_rect(self.fire, self.fire_door)
         new_water_dist = self._distance_to_rect(self.water, self.water_door)
@@ -138,10 +223,15 @@ class FireWaterEnv(MultiAgentEnv):
         # Individual progress rewards — each agent rewarded for own door
         fire_progress = (old_fire_dist - new_fire_dist) * 0.05
         water_progress = (old_water_dist - new_water_dist) * 0.05
+        water_x_delta = max(0.0, self._max_water_x - old_max_water_x)
+        water_forward_progress = min(0.08, water_x_delta * 0.015)
+        if 500.0 <= self.water.x <= 700.0:
+            water_forward_progress += min(0.12, water_x_delta * 0.025)
+        team_min_progress = min(0.06, max(0.0, min(self.fire.x, self.water.x) - old_team_min_x) * 0.01)
 
         # Gem collection rewards
-        fire_gem_bonus = (old_red_count - len(self.red_gems)) * 2.0
-        water_gem_bonus = (old_blue_count - len(self.blue_gems)) * 2.0
+        fire_gem_bonus = (old_red_count - len(self.red_gems)) * 5.0
+        water_gem_bonus = (old_blue_count - len(self.blue_gems)) * 5.0
 
         # One-time door-reached bonus
         fire_door_bonus = 0.0
@@ -153,10 +243,6 @@ class FireWaterEnv(MultiAgentEnv):
             water_door_bonus = 20.0
             self._water_door_rewarded = True
 
-        # Proximity penalty for approaching lethal hazards
-        fire_hazard_pen = self._hazard_proximity_penalty(self.fire, LETHAL_HAZARDS[FIREBOY])
-        water_hazard_pen = self._hazard_proximity_penalty(self.water, LETHAL_HAZARDS[WATERGIRL])
-
         shared_step = -0.01
         if self._both_idle(action_dict):
             shared_step -= 0.04
@@ -164,19 +250,63 @@ class FireWaterEnv(MultiAgentEnv):
             shared_step += 0.005
         if self.button_opened:
             shared_step += 0.005
+        team_gap = max(0.0, abs(self.fire.x - self.water.x) - 180.0)
+        team_gap_pen = min(0.025, team_gap / 9000.0)
+        fire_abandon_pen = 0.0
+        if self.fire.x > 600.0 and self.water.x < 520.0:
+            fire_abandon_pen = min(0.04, (self.fire.x - self.water.x - 80.0) / 8000.0)
+        stage_stall_pen = 0.0
+        if len(self._team_checkpoints) < 4 and self._steps_since_team_checkpoint > 1000:
+            stage_stall_pen = min(0.015, (self._steps_since_team_checkpoint - 1000) / 30000.0)
+        water_fire_edge_pen = 0.0
+        if self._water_fire_edge_steps > 45:
+            water_fire_edge_pen = min(0.06, (self._water_fire_edge_steps - 45) / 1200.0)
 
-        fire_reward = shared_step + fire_progress + fire_gem_bonus + fire_door_bonus - fire_hazard_pen
-        water_reward = shared_step + water_progress + water_gem_bonus + water_door_bonus - water_hazard_pen
+        fire_reward = (shared_step + fire_progress + team_min_progress + fire_gem_bonus + fire_door_bonus
+                       + fire_checkpoint + team_checkpoint - fire_idle_pen - team_gap_pen
+                       - fire_abandon_pen - stage_stall_pen)
+        water_reward = (shared_step + water_progress + water_forward_progress + team_min_progress
+                        + water_gem_bonus + water_door_bonus
+                        + water_checkpoint + team_checkpoint - water_idle_pen - team_gap_pen
+                        - water_fire_edge_pen - stage_stall_pen)
 
         if death:
-            fire_died = self._death_agent(self.fire, LETHAL_HAZARDS[FIREBOY])
-            water_died = self._death_agent(self.water, LETHAL_HAZARDS[WATERGIRL])
-            # Primary penalty to agent that caused the death, smaller cross-penalty
-            fire_reward -= 20.0 if fire_died else 5.0
-            water_reward -= 20.0 if water_died else 5.0
+            fire_reward -= 100.0 if fire_died else 20.0
+            water_reward -= 115.0 if water_died else 20.0
+            if water_died and len(self._team_checkpoints) >= 2:
+                water_reward -= 15.0
         if win:
             fire_reward += 100.0
             water_reward += 100.0
+        if truncated:
+            fire_reward -= 50.0
+            water_reward -= 50.0
+
+        if death or win or truncated:
+            self.last_episode_metrics = {
+                "win_rate": float(win),
+                "death_rate": float(death),
+                "fire_died_rate": float(fire_died),
+                "water_died_rate": float(water_died),
+                "truncated_rate": float(truncated and not death and not win),
+                "gem_count": float(self._episode_red_gems_collected + self._episode_blue_gems_collected),
+                "checkpoint_count": float(len(self._fire_checkpoints) + len(self._water_checkpoints)),
+                "fire_checkpoint_count": float(len(self._fire_checkpoints)),
+                "water_checkpoint_count": float(len(self._water_checkpoints)),
+                "team_checkpoint_count": float(len(self._team_checkpoints)),
+                "team_gap": float(abs(self.fire.x - self.water.x)),
+                "max_fire_x": float(self._max_fire_x),
+                "max_water_x": float(self._max_water_x),
+                "water_cleared_fire_pool_rate": float("cleared_fire_pool" in self._water_checkpoints),
+                "water_fire_edge_steps": float(self._water_fire_edge_steps),
+                "steps_since_team_checkpoint": float(self._steps_since_team_checkpoint),
+                "stage_stall_penalty": float(stage_stall_pen),
+                "water_fire_edge_penalty": float(water_fire_edge_pen),
+                "fire_final_x": float(self.fire.x),
+                "fire_final_y": float(self.fire.y),
+                "water_final_x": float(self.water.x),
+                "water_final_y": float(self.water.y),
+            }
 
         obs = self._obs_all()
         rewards = {FIREBOY: float(fire_reward), WATERGIRL: float(water_reward)}
@@ -184,7 +314,32 @@ class FireWaterEnv(MultiAgentEnv):
         truncateds = {agent: bool(truncated) for agent in AGENTS}
         terminateds["__all__"] = bool(death or win)
         truncateds["__all__"] = bool(truncated)
-        infos = {agent: {"death": death, "win": win, "steps": self.steps} for agent in AGENTS}
+        infos = {
+            agent: {
+                "death": death,
+                "fire_died": fire_died,
+                "water_died": water_died,
+                "win": win,
+                "steps": self.steps,
+                "fire_final_pos": (self.fire.x, self.fire.y),
+                "water_final_pos": (self.water.x, self.water.y),
+                "gem_count": self._episode_red_gems_collected + self._episode_blue_gems_collected,
+                "checkpoint_count": len(self._fire_checkpoints) + len(self._water_checkpoints),
+                "fire_checkpoint_count": len(self._fire_checkpoints),
+                "water_checkpoint_count": len(self._water_checkpoints),
+                "team_checkpoint_count": len(self._team_checkpoints),
+                "team_gap": abs(self.fire.x - self.water.x),
+                "max_fire_x": self._max_fire_x,
+                "max_water_x": self._max_water_x,
+                "water_cleared_fire_pool": "cleared_fire_pool" in self._water_checkpoints,
+                "water_fire_edge_steps": self._water_fire_edge_steps,
+                "steps_since_team_checkpoint": self._steps_since_team_checkpoint,
+                "stage_stall_penalty": stage_stall_pen,
+                "water_fire_edge_penalty": water_fire_edge_pen,
+                "step_checkpoint_count": fire_checkpoint_count if agent == FIREBOY else water_checkpoint_count,
+            }
+            for agent in AGENTS
+        }
 
         if self.auto_reset_on_done and (death or win or truncated):
             reset_obs, reset_infos = self.reset()
@@ -224,6 +379,8 @@ class FireWaterEnv(MultiAgentEnv):
             pygame.draw.rect(self.screen, (180, 135, 80), self.box)
         pygame.draw.rect(self.screen, (245, 95, 55), self._rect(self.fire))
         pygame.draw.rect(self.screen, (70, 170, 245), self._rect(self.water))
+        pygame.draw.rect(self.screen, (255, 255, 255), self._hazard_rect(FIREBOY, self.fire), 1)
+        pygame.draw.rect(self.screen, (255, 255, 255), self._hazard_rect(WATERGIRL, self.water), 1)
         pygame.display.flip()
         if self.clock is not None:
             self.clock.tick(self.metadata["render_fps"])
@@ -254,11 +411,13 @@ class FireWaterEnv(MultiAgentEnv):
             self.blue_gems = {(300, 150), (145, 330), (80, 726), (650, 641), (910, 100), (865, 460)}
             self.box = pygame.Rect(828, 235, 35, 35)
             self.button_rect = pygame.Rect(930, 520, 55, 20)
+            self._fire_checkpoint_zones = []
+            self._water_checkpoint_zones = []
         else:
             self.fire = PlayerState(60, 742)
             self.water = PlayerState(60, 572)
             self.platforms = [
-                pygame.Rect(0, 792, 1100, 10), pygame.Rect(10, 680, 350, 20),
+                pygame.Rect(0, 792, 1100, 10), pygame.Rect(10, 680, 270, 20),
                 pygame.Rect(190, 424, 365, 20), pygame.Rect(1020, 710, 50, 20),
                 pygame.Rect(10, 200, 140, 140), pygame.Rect(505, 623, 425, 20),
                 pygame.Rect(10, 540, 70, 20), pygame.Rect(150, 310, 790, 20),
@@ -274,6 +433,32 @@ class FireWaterEnv(MultiAgentEnv):
             self.blue_gems = {(60, 130), (700, 390), (550, 556), (775, 731)}
             self.box = None
             self.button_rect = pygame.Rect(300, 406, 55, 20)
+            self._fire_checkpoint_zones = [
+                Checkpoint("early_lower", pygame.Rect(220, 650, 180, 150), 1.0),
+                Checkpoint("before_first_pool", pygame.Rect(410, 700, 110, 100), 1.5),
+                Checkpoint("approach_fire_pool", pygame.Rect(525, 680, 100, 130), 3.0),
+                Checkpoint("fire_pool_edge", pygame.Rect(500, 680, 55, 130), 1.0),
+                Checkpoint("cleared_fire_pool", pygame.Rect(635, 680, 70, 130), 2.0),
+                Checkpoint("after_fire_pool", pygame.Rect(645, 680, 150, 130), 5.0),
+                Checkpoint("safe_after_fire_pool", pygame.Rect(660, 680, 90, 130), 2.0),
+                Checkpoint("lower_right", pygame.Rect(860, 680, 180, 120), 4.0),
+                Checkpoint("middle_platform", pygame.Rect(500, 560, 450, 90), 5.0),
+                Checkpoint("upper_middle", pygame.Rect(560, 400, 540, 100), 5.0),
+                Checkpoint("top_route", pygame.Rect(430, 120, 650, 100), 6.0),
+            ]
+            self._water_checkpoint_zones = [
+                Checkpoint("early_lower", pygame.Rect(200, 620, 220, 180), 4.0),
+                Checkpoint("before_first_pool", pygame.Rect(410, 680, 105, 120), 5.0),
+                Checkpoint("fire_pool_edge", pygame.Rect(485, 660, 70, 140), 3.0),
+                Checkpoint("approach_fire_pool", pygame.Rect(525, 660, 100, 140), 7.0),
+                Checkpoint("cleared_fire_pool", pygame.Rect(635, 660, 90, 140), 40.0),
+                Checkpoint("after_fire_pool", pygame.Rect(645, 660, 165, 140), 10.0),
+                Checkpoint("safe_after_fire_pool", pygame.Rect(700, 660, 170, 140), 15.0),
+                Checkpoint("lower_right", pygame.Rect(860, 680, 180, 120), 5.0),
+                Checkpoint("middle_platform", pygame.Rect(500, 560, 450, 90), 5.0),
+                Checkpoint("upper_middle", pygame.Rect(560, 400, 540, 100), 5.0),
+                Checkpoint("top_route", pygame.Rect(430, 120, 650, 100), 6.0),
+            ]
 
     def _apply_player_action(self, player: PlayerState, action: int):
         player.vx = 0.0
@@ -294,7 +479,11 @@ class FireWaterEnv(MultiAgentEnv):
         player.on_ground = False
         rect = self._rect(player)
         for platform in self.platforms:
-            if rect.colliderect(platform) and player.vy >= 0 and rect.bottom - player.vy <= platform.top + 4:
+            if (
+                rect.colliderect(platform)
+                and player.vy >= 0
+                and (rect.bottom - player.vy <= platform.top + 4 or rect.top < platform.top)
+            ):
                 player.y = platform.top - self.player_h
                 player.vy = 0.0
                 player.on_ground = True
@@ -319,8 +508,10 @@ class FireWaterEnv(MultiAgentEnv):
         water_rect = self._rect(self.water)
         if self.level == 1:
             arm_rect = pygame.Rect(270, 520, 55, 60)
-            if fire_rect.colliderect(arm_rect) or water_rect.colliderect(arm_rect):
-                self.arm_opened = True
+            arm_pressed = fire_rect.colliderect(arm_rect) or water_rect.colliderect(arm_rect)
+            if arm_pressed and not self.arm_was_pressed:
+                self.arm_opened = not self.arm_opened
+            self.arm_was_pressed = arm_pressed
             self.button_opened = fire_rect.colliderect(self.button_rect) or water_rect.colliderect(self.button_rect)
         else:
             box_pressed = self.box is not None and self.box.colliderect(self.button_rect)
@@ -337,8 +528,8 @@ class FireWaterEnv(MultiAgentEnv):
         self.water.door_opened = self.water.door_opened or self._rect(self.water).colliderect(self.water_door)
 
     def _death(self) -> bool:
-        fire_rect = self._rect(self.fire)
-        water_rect = self._rect(self.water)
+        fire_rect = self._hazard_rect(FIREBOY, self.fire)
+        water_rect = self._hazard_rect(WATERGIRL, self.water)
         for hazard in self.hazards:
             if hazard.kind in LETHAL_HAZARDS[FIREBOY] and fire_rect.colliderect(hazard.rect):
                 return True
@@ -347,11 +538,13 @@ class FireWaterEnv(MultiAgentEnv):
         return False
 
     def _death_agent(self, player: PlayerState, lethal_kinds: set[str]) -> bool:
-        rect = self._rect(player)
+        agent = FIREBOY if player is self.fire else WATERGIRL
+        rect = self._hazard_rect(agent, player)
         return any(hazard.kind in lethal_kinds and rect.colliderect(hazard.rect) for hazard in self.hazards)
 
     def _hazard_proximity_penalty(self, player: PlayerState, lethal_kinds: set[str]) -> float:
-        rect = self._rect(player)
+        agent = FIREBOY if player is self.fire else WATERGIRL
+        rect = self._hazard_rect(agent, player)
         penalty = 0.0
         for hazard in self.hazards:
             if hazard.kind in lethal_kinds:
@@ -365,6 +558,35 @@ class FireWaterEnv(MultiAgentEnv):
 
     def _team_distance(self) -> float:
         return self._distance_to_rect(self.fire, self.fire_door) + self._distance_to_rect(self.water, self.water_door)
+
+    def _checkpoint_bonus(self, player: PlayerState, checkpoints: list[Checkpoint], reached: set[str]) -> float:
+        rect = self._rect(player)
+        bonus = 0.0
+        for checkpoint in checkpoints:
+            if checkpoint.name not in reached and rect.colliderect(checkpoint.rect):
+                reached.add(checkpoint.name)
+                bonus += checkpoint.reward
+        return bonus
+
+    def _team_checkpoint_bonus(self) -> float:
+        bonus = 0.0
+        common_checkpoints = self._fire_checkpoints & self._water_checkpoints
+        for checkpoint_name in common_checkpoints:
+            if checkpoint_name not in self._team_checkpoints:
+                self._team_checkpoints.add(checkpoint_name)
+                if checkpoint_name == "cleared_fire_pool":
+                    bonus += 18.0
+                elif checkpoint_name == "safe_after_fire_pool":
+                    bonus += 10.0
+                elif checkpoint_name == "fire_pool_edge":
+                    bonus += 2.0
+                elif checkpoint_name == "after_fire_pool":
+                    bonus += 8.0
+                elif checkpoint_name == "approach_fire_pool":
+                    bonus += 6.0
+                else:
+                    bonus += 4.0
+        return bonus
 
     def _distance_to_rect(self, player: PlayerState, target: pygame.Rect) -> float:
         return math.hypot(player.x - target.centerx, player.y - target.centery) / max(self.width, self.height)
@@ -421,3 +643,12 @@ class FireWaterEnv(MultiAgentEnv):
 
     def _rect(self, player: PlayerState) -> pygame.Rect:
         return pygame.Rect(int(player.x), int(player.y), self.player_w, self.player_h)
+
+    def _hazard_rect(self, agent: str, player: PlayerState) -> pygame.Rect:
+        left, top, right, bottom = PLAYER_HAZARD_INSETS[agent]
+        return pygame.Rect(
+            int(player.x) + left,
+            int(player.y) + top,
+            max(1, self.player_w - left - right),
+            max(1, self.player_h - top - bottom),
+        )
